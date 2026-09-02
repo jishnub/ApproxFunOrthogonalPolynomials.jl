@@ -136,6 +136,45 @@ end
 
 ## Conversion Operator
 
+# Assemble a chain of conversions into a `ConversionWrapper` around a `TimesOperator`.
+#
+# The chain is stored as a `Vector{Operator{T}}` rather than as a vector of the concrete
+# operator types: the latter is a small `Union` here, which makes inference union-split the
+# entire operator algebra downstream, and one such chain was responsible for a 23s method
+# compilation. `_conversion_shiftordersbyone` stores its chain the same way.
+#
+# Every field of the `TimesOperator` is computed here from the concretely typed arguments and
+# passed explicitly, so that inference never has to reason about the abstract element type of
+# the stored vector. Leaving them to the constructor's defaults makes the type parameters of
+# the `TimesOperator` uninferrable.
+function _conversionchain(A, B, v::AbstractVector{<:Operator}, bw)
+    ops = Operator{eltype(eltype(v))}[v;]
+    _conversionchainwrapper(A, B, ops, bw,
+        bandwidthssum(subblockbandwidths, v),
+        all(isbandedblockbanded, v),
+        all(israggedbelow, v))
+end
+function _conversionchain(A, B, v::AbstractVector{<:Operator}, tail::Operator, bw)
+    ops = Operator{promote_type(eltype(eltype(v)), eltype(tail))}[v; tail]
+    _conversionchainwrapper(A, B, ops, bw,
+        bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(tail),
+        all(isbandedblockbanded, v) && isbandedblockbanded(tail),
+        all(israggedbelow, v) && israggedbelow(tail))
+end
+function _conversionchainwrapper(A::SA, B::SB, ops::Vector{Operator{T}}, bw::BW, sbbw::SBBW,
+        ibbb::Bool, irb::Bool) where {SA<:Space, SB<:Space, T, BW, SBBW}
+    sz = (ℵ₀,ℵ₀)
+    # the chain is square and infinite, so it is never a functional
+    isaf = false
+    # The types below are fully determined by the method signature. We spell them out and
+    # assert them, so that the inferred return type cannot depend on how well inference
+    # manages to fold the `TimesOperator` constructor -- it widened to `Any` on Julia v1.10
+    # otherwise, which broke the `@inferred` tests for `Conversion`.
+    TO = TimesOperator{T, BW, typeof(sz), Operator{T}, BW, SBBW}
+    C = TimesOperator(ops, bw, sz, bw, sbbw, ibbb, irb, isaf, anytimesop = false)::TO
+    ConversionWrapper(C, A, B)::ConversionWrapper{SA, SB, T, TO}
+end
+
 function Conversion(A::Chebyshev, B::Ultraspherical)
     @assert domain(A) == domain(B)
     mB = order(B)
@@ -148,14 +187,8 @@ function Conversion(A::Chebyshev, B::Ultraspherical)
         v = [ConcreteConversion(Ultraspherical(i-1, d), Ultraspherical(i,d)) for i in r]
         U = domainspace(last(v))
         CAU = ConcreteConversion(A, U)
-        # we deliberately use Operator{T} instead of a Union of the concrete types,
-        # as the latter forces inference to union-split the entire operator algebra
-        v2 = Operator{promote_type(eltype(eltype(v)), eltype(CAU))}[v; CAU]
-        bwsum = isapproxinteger(mB) ? (0, 2length(v2)) : (0,ℵ₀)
-        # the sums are evaluated over the concretely typed vectors,
-        # as the elements of v2 are only known to be `Operator`s
-        sbbw = bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(CAU)
-        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum, sbbw), A, B)
+        bwsum = isapproxinteger(mB) ? (0, 2(length(v)+1)) : (0,ℵ₀)
+        return _conversionchain(A, B, v, CAU, bwsum)
     end
     throw(ArgumentError("please implement $A → $B"))
 end
@@ -179,21 +212,15 @@ function ultraconv_nonequal(A, B)
     elseif b-a > 1
         r = b:-1:a+1
         v = [ConcreteConversion(Ultraspherical(i-1,d), Ultraspherical(i,d)) for i in r]
-        # we deliberately use Operator{T} instead of a Union of the concrete types,
-        # as the latter forces inference to union-split the entire operator algebra.
-        # Using the same element type in both branches also makes the return type
-        # of this function independent of the branch that is taken.
-        # the sums are evaluated over the concretely typed vector v,
-        # as the elements of v2 are only known to be `Operator`s
-        v2, sbbw = if !(last(r) ≈ a+1)
-            vlast = ConcreteConversion(A, Ultraspherical(last(r)-1, d))
-            Operator{promote_type(eltype(eltype(v)), eltype(vlast))}[v; vlast],
-                bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(vlast)
-        else
-            Operator{eltype(eltype(v))}[v;], bandwidthssum(subblockbandwidths, v)
-        end
         bwsum = isapproxinteger(b-a) ? (0, 2length(v)) : (0,ℵ₀)
-        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum, sbbw), A, B)
+        # using the same element type in both branches also makes the return type
+        # of this function independent of the branch that is taken
+        if !(last(r) ≈ a+1)
+            vlast = ConcreteConversion(A, Ultraspherical(last(r)-1, d))
+            return _conversionchain(A, B, v, vlast, bwsum)
+        else
+            return _conversionchain(A, B, v, bwsum)
+        end
     else
         throw(ArgumentError("please implement $A → $B"))
     end
