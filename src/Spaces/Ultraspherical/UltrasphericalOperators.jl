@@ -148,9 +148,14 @@ function Conversion(A::Chebyshev, B::Ultraspherical)
         v = [ConcreteConversion(Ultraspherical(i-1, d), Ultraspherical(i,d)) for i in r]
         U = domainspace(last(v))
         CAU = ConcreteConversion(A, U)
-        v2 = Union{eltype(v), typeof(CAU)}[v; CAU]
+        # we deliberately use Operator{T} instead of a Union of the concrete types,
+        # as the latter forces inference to union-split the entire operator algebra
+        v2 = Operator{promote_type(eltype(eltype(v)), eltype(CAU))}[v; CAU]
         bwsum = isapproxinteger(mB) ? (0, 2length(v2)) : (0,ℵ₀)
-        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum), A, B)
+        # the sums are evaluated over the concretely typed vectors,
+        # as the elements of v2 are only known to be `Operator`s
+        sbbw = bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(CAU)
+        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum, sbbw), A, B)
     end
     throw(ArgumentError("please implement $A → $B"))
 end
@@ -174,14 +179,21 @@ function ultraconv_nonequal(A, B)
     elseif b-a > 1
         r = b:-1:a+1
         v = [ConcreteConversion(Ultraspherical(i-1,d), Ultraspherical(i,d)) for i in r]
-        if !(last(r) ≈ a+1)
+        # we deliberately use Operator{T} instead of a Union of the concrete types,
+        # as the latter forces inference to union-split the entire operator algebra.
+        # Using the same element type in both branches also makes the return type
+        # of this function independent of the branch that is taken.
+        # the sums are evaluated over the concretely typed vector v,
+        # as the elements of v2 are only known to be `Operator`s
+        v2, sbbw = if !(last(r) ≈ a+1)
             vlast = ConcreteConversion(A, Ultraspherical(last(r)-1, d))
-            v2 = Union{eltype(v), typeof(vlast)}[v; vlast]
+            Operator{promote_type(eltype(eltype(v)), eltype(vlast))}[v; vlast],
+                bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(vlast)
         else
-            v2 = v
+            Operator{eltype(eltype(v))}[v;], bandwidthssum(subblockbandwidths, v)
         end
         bwsum = isapproxinteger(b-a) ? (0, 2length(v)) : (0,ℵ₀)
-        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum), A, B)
+        return ConversionWrapper(TimesOperator(v2, bwsum, (ℵ₀,ℵ₀), bwsum, sbbw), A, B)
     else
         throw(ArgumentError("please implement $A → $B"))
     end
