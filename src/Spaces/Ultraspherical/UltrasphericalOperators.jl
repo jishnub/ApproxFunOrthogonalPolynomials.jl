@@ -147,32 +147,36 @@ end
 # passed explicitly, so that inference never has to reason about the abstract element type of
 # the stored vector. Leaving them to the constructor's defaults makes the type parameters of
 # the `TimesOperator` uninferrable.
-function _conversionchain(A, B, v::AbstractVector{<:Operator}, bw)
+function _conversionchain(A, B, v::AbstractVector{<:Operator}, bwsum)
     ops = Operator{eltype(eltype(v))}[v;]
-    _conversionchainwrapper(A, B, ops, bw,
+    _conversionchainwrapper(A, B, ops, bwsum,
         bandwidthssum(subblockbandwidths, v),
         all(isbandedblockbanded, v),
         all(israggedbelow, v))
 end
-function _conversionchain(A, B, v::AbstractVector{<:Operator}, tail::Operator, bw)
+function _conversionchain(A, B, v::AbstractVector{<:Operator}, tail::Operator, bwsum)
     ops = Operator{promote_type(eltype(eltype(v)), eltype(tail))}[v; tail]
-    _conversionchainwrapper(A, B, ops, bw,
+    _conversionchainwrapper(A, B, ops, bwsum,
         bandwidthssum(subblockbandwidths, v) .+ subblockbandwidths(tail),
         all(isbandedblockbanded, v) && isbandedblockbanded(tail),
         all(israggedbelow, v) && israggedbelow(tail))
 end
-function _conversionchainwrapper(A::SA, B::SB, ops::Vector{Operator{T}}, bw::BW, sbbw::SBBW,
-        ibbb::Bool, irb::Bool) where {SA<:Space, SB<:Space, T, BW, SBBW}
+# The type parameters BW and SBBW are named after the corresponding ones of `TimesOperator`
+function _conversionchainwrapper(A::SA, B::SB, ops::Vector{Operator{T}},
+        bwsum::BW, subblockbwsum::SBBW, bandedblockbanded::Bool, raggedbelow::Bool
+        ) where {SA<:Space, SB<:Space, T, BW, SBBW}
+
     sz = (ℵ₀,ℵ₀)
     # the chain is square and infinite, so it is never a functional
-    isaf = false
+    isafunctional = false
     # The types below are fully determined by the method signature. We spell them out and
     # assert them, so that the inferred return type cannot depend on how well inference
     # manages to fold the `TimesOperator` constructor -- it widened to `Any` on Julia v1.10
     # otherwise, which broke the `@inferred` tests for `Conversion`.
-    TO = TimesOperator{T, BW, typeof(sz), Operator{T}, BW, SBBW}
-    C = TimesOperator(ops, bw, sz, bw, sbbw, ibbb, irb, isaf, anytimesop = false)::TO
-    ConversionWrapper(C, A, B)::ConversionWrapper{SA, SB, T, TO}
+    TimesOp = TimesOperator{T, BW, typeof(sz), Operator{T}, BW, SBBW}
+    chain = TimesOperator(ops, bwsum, sz, bwsum, subblockbwsum,
+        bandedblockbanded, raggedbelow, isafunctional, anytimesop = false)::TimesOp
+    ConversionWrapper(chain, A, B)::ConversionWrapper{SA, SB, T, TimesOp}
 end
 
 function Conversion(A::Chebyshev, B::Ultraspherical)
